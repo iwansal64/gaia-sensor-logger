@@ -1,14 +1,14 @@
-use dotenv::dotenv;
+use dotenvy::dotenv;
 use gaia_sensor_logger::constants::{config, model};
 use mongodb::{
     Collection,
-    bson::DateTime,
     options::{ClientOptions, TimeseriesOptions},
 };
 use rumqttc::{AsyncClient, Event, MqttOptions, QoS};
 use sqlx::postgres::PgPoolOptions;
 use std::{collections::HashMap, env};
 use tokio;
+use chrono::Local;
 
 #[tokio::main]
 async fn main() -> Result<(), String> {
@@ -162,7 +162,7 @@ async fn main() -> Result<(), String> {
                         metadata: model::Metadata {
                             device_id: device_id.to_string(),
                         },
-                        timestamp: DateTime::now(),
+                        timestamp: Local::now().to_rfc3339(),
                         data: value,
                     };
 

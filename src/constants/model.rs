@@ -1,17 +1,17 @@
-use mongodb::bson::DateTime;
 use serde::{Serialize, Deserialize};
 use sqlx::FromRow;
-use chrono::{NaiveDateTime};
+use chrono::NaiveDateTime;
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Metadata {
     pub device_id: String
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize,)]
 pub struct SensorData {
     pub metadata: Metadata,
-    pub timestamp: DateTime,
+    #[serde(with = "bson::serde_helpers::datetime::FromRfc3339String")]
+    pub timestamp: String,
     pub data: f32
 }
 
