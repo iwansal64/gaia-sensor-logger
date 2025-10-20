@@ -1,17 +1,17 @@
+use rocket::{launch, routes};
 use dotenvy::dotenv;
-use gaia_sensor_logger::constants::{config, model};
+use gaia_sensor_logger::{api::sensor::get_sensor, constants::{config, model, types::CollectionsData}};
 use mongodb::{
-    Collection,
-    options::{ClientOptions, TimeseriesOptions},
+    options::{ClientOptions, TimeseriesOptions}, Collection
 };
 use rumqttc::{AsyncClient, Event, MqttOptions, QoS};
 use sqlx::postgres::PgPoolOptions;
-use std::{collections::HashMap, env};
-use tokio;
+use std::{collections::HashMap, env, process::exit, sync::Arc};
+use tokio::{self, sync::RwLock};
 use chrono::Local;
 
-#[tokio::main]
-async fn main() -> Result<(), String> {
+#[launch]
+async fn rocket() -> _ {
     // --- --- --- --- Setup Dotenv
     dotenv().ok(); // Reads the .env file
 
@@ -21,7 +21,8 @@ async fn main() -> Result<(), String> {
     let mongo_options = match ClientOptions::parse(&mongo_url).await {
         Ok(opt) => opt,
         Err(err) => {
-            return Err(err.to_string());
+            println!("[MongoDB] There's an error when trying to parse Client Options. Error: {}", err.to_string());
+            exit(0);
         }
     };
     let mongo_client = mongodb::Client::with_options(mongo_options).unwrap();
@@ -29,7 +30,8 @@ async fn main() -> Result<(), String> {
     let available_collections = match db.list_collection_names().await {
         Ok(data) => data,
         Err(err) => {
-            return Err(err.to_string());
+            println!("[MongoDB] There's an error when trying to get list of collections. Error: {}", err.to_string());
+            exit(0);
         }
     };
 
@@ -47,7 +49,7 @@ async fn main() -> Result<(), String> {
 
     // --- --- --- --- Verify and create collections if not exists
     println!("[MongoDB] Verifying MongoDB collections...");
-    let mut collections: HashMap<String, Collection<model::SensorData>> = HashMap::new();
+    let collections: CollectionsData = Arc::new(RwLock::new(HashMap::new()));
     // Iterate each collections that we want to use for logging data
     for topic_name in config::DB_COLLECTIONS.keys() {
         let collection_name: &String = config::DB_COLLECTIONS.get(topic_name).unwrap();
@@ -72,7 +74,8 @@ async fn main() -> Result<(), String> {
 
         // Get the collection value
         let collection: Collection<model::SensorData> = db.collection(collection_name.as_str());
-        collections.insert(topic_name.clone(), collection);
+        let mut locked_collections = collections.write().await;
+        locked_collections.insert(topic_name.clone(), collection);
     }
 
     println!("[MongoDB] MongoDB Collections has been set up! ✅");
@@ -90,7 +93,7 @@ async fn main() -> Result<(), String> {
     if devices_id.len() == 0 {
         println!("[PostgreSQL] There's no device exists in database");
         println!("👋🏻 I'm leaving...");
-        return Ok(());
+        exit(0);
     }
     println!("[PostgreSQL] All devices data has been retrieved ✅");
 
@@ -124,61 +127,86 @@ async fn main() -> Result<(), String> {
     }
 
     println!("[MQTT] Listening to MQTT messages ✅");
+    let cloned_collections = collections.clone();
     // --- --- --- --- Process MQTT events
-    loop {
-        let event = eventloop.poll().await.unwrap();
-        if let Event::Incoming(incoming) = event {
-            // Get Connect Message
-            if let rumqttc::Packet::Connect(_) = incoming {
-                println!("[MQTT] Connected!");
-            } else if let rumqttc::Packet::Publish(publish) = incoming {
-                let payload = String::from_utf8_lossy(&publish.payload);
-                println!("[MQTT] Message on {:?}: {}", publish.topic, payload);
+    tokio::spawn(async move {
+        loop {
+            let event = eventloop.poll().await;
 
-                if let Ok(value) = payload.parse::<f32>() {
-                    let subtopics: Vec<&str> = publish.topic.split("/").collect::<Vec<&str>>();
-                    let subtopic: String = match subtopics.get(1) {
-                        Some(data) => data.to_string(),
-                        None => {
-                            println!(
-                                "[MQTT] Sir, I got a weird case where there's no '/' in the topic. But, you've said that it won't be possible"
-                            );
-                            continue;
+            let event = match event {
+                Ok(data) => data,
+                Err(err) => {
+                    println!("[MQTT] Connection Error: {}", err.to_string());
+                    continue;
+                }
+            };
+            
+            if let Event::Incoming(incoming) = event {
+                // Get Connect Message
+                if let rumqttc::Packet::Connect(_) = incoming {
+                    println!("[MQTT] Connected!");
+                } else if let rumqttc::Packet::Publish(publish) = incoming {
+                    let payload = String::from_utf8_lossy(&publish.payload);
+                    println!("[MQTT] Message on {:?}: {}", publish.topic, payload);
+
+                    if let Ok(value) = payload.parse::<f32>() {
+                        let subtopics: Vec<&str> = publish.topic.split("/").collect::<Vec<&str>>();
+                        let subtopic: String = match subtopics.get(1) {
+                            Some(data) => data.to_string(),
+                            None => {
+                                println!(
+                                    "[MQTT] Sir, I got a weird case where there's no '/' in the topic. But, you've said that it won't be possible"
+                                );
+                                continue;
+                            }
+                        };
+                        let device_id = subtopics.first().unwrap();
+
+                        let locked_collections = cloned_collections.read().await;
+                        let collection = match locked_collections.get(&subtopic) {
+                            Some(col) => col,
+                            None => {
+                                println!(
+                                    "[MQTT] Hello, sir. I got a weird case where the recieved topic from client is different from what we've planned. (ec, tds, ph, tempC)"
+                                );
+                                continue;
+                            }
+                        };
+
+                        let sensor_data: model::SensorData = model::SensorData {
+                            id: None,
+                            metadata: model::Metadata {
+                                device_id: device_id.to_string(),
+                            },
+                            timestamp: Local::now().to_rfc3339(),
+                            data: value,
+                        };
+
+                        let insert_result = collection.insert_one(sensor_data).await;
+
+                        match insert_result {
+                            Ok(_) => println!("[MQTT] Stored in MongoDB"),
+                            Err(err) => println!(
+                                "[MQTT] Error when storing data to MongoDB. Error: {}",
+                                err.to_string()
+                            ),
                         }
-                    };
-                    let device_id = subtopics.first().unwrap();
-
-                    let collection = match collections.get(&subtopic) {
-                        Some(col) => col,
-                        None => {
-                            println!(
-                                "[MQTT] Hello, sir. I got a weird case where the recieved topic from client is different from what we've planned. (ec, tds, ph, tempC)"
-                            );
-                            continue;
-                        }
-                    };
-
-                    let sensor_data: model::SensorData = model::SensorData {
-                        metadata: model::Metadata {
-                            device_id: device_id.to_string(),
-                        },
-                        timestamp: Local::now().to_rfc3339(),
-                        data: value,
-                    };
-
-                    let insert_result = collection.insert_one(sensor_data).await;
-
-                    match insert_result {
-                        Ok(_) => println!("[MQTT] Stored in MongoDB"),
-                        Err(err) => println!(
-                            "[MQTT] Error when storing data to MongoDB. Error: {}",
-                            err.to_string()
-                        ),
+                    } else {
+                        println!("[MQTT] Invalid JSON format");
                     }
-                } else {
-                    println!("[MQTT] Invalid JSON format");
                 }
             }
         }
-    }
+    });
+
+    rocket::build()
+        .configure(rocket::Config {
+            port: env::var("SERVER_PORT").unwrap_or(String::from("8091")).parse().expect("BRUH IT'S NOT EVEN A NUMBER!!"),
+            log_level: rocket::config::LogLevel::Normal,
+            ..rocket::Config::default()
+        })
+        .manage(collections)
+        .mount("/sensor", routes![
+            get_sensor
+        ])
 }

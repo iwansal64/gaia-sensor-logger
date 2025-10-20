@@ -1,3 +1,4 @@
+use mongodb::bson::oid::ObjectId;
 use serde::{Serialize, Deserialize};
 use sqlx::FromRow;
 use chrono::NaiveDateTime;
@@ -9,6 +10,8 @@ pub struct Metadata {
 
 #[derive(Debug, Serialize, Deserialize,)]
 pub struct SensorData {
+    #[serde(rename = "_id", skip_serializing_if = "Option::is_none")]
+    pub id: Option<ObjectId>,
     pub metadata: Metadata,
     #[serde(with = "bson::serde_helpers::datetime::FromRfc3339String")]
     pub timestamp: String,
