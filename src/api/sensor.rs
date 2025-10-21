@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use chrono::{Duration, Utc};
-use rocket::{futures::TryStreamExt, get, http, serde::json::Json, State};
+use rocket::{futures::TryStreamExt, post, http, serde::json::Json, State};
 use serde::{Deserialize, Serialize};
 use mongodb::bson::{doc, DateTime};
 
@@ -19,7 +19,7 @@ pub struct GetSensorRequest {
       pub topic: Option<String>
 }
 
-#[get("/get", format="json", data="<body>")]
+#[post("/get", format="json", data="<body>")]
 pub async fn get_sensor(body: Json<GetSensorRequest>, collections: &State<CollectionsData>) -> Result<Json<GetSensorResponse>, http::Status> {
       // Lock the collections
       let locked_collections = collections.read().await;
