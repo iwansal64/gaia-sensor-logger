@@ -107,6 +107,7 @@ async fn rocket() -> _ {
     let mut mqttoptions = MqttOptions::new(mqtt_username.clone(), mqtt_url, 1883);
     mqttoptions.set_credentials(mqtt_username, mqtt_password);
     mqttoptions.set_keep_alive(std::time::Duration::from_secs(5));
+    mqttoptions.set_clean_session(true);
 
     // Connect to the MQTT Broker
     println!("[MQTT] Setting up Connection to MQTT...");
